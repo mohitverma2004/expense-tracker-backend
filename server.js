@@ -12,35 +12,54 @@ const app = express();
 const PORT = process.env.PORT || 5001;
 
 // ===== SECURITY MIDDLEWARE =====
-
-// Helmet - sets various HTTP headers for security
 app.use(helmet());
 
-// Rate limiting - prevent brute force attacks
 const limiter = rateLimit({
-  windowMs: 15 * 60 * 1000, // 15 minutes
-  max: 100, // limit each IP to 100 requests per windowMs
+  windowMs: 15 * 60 * 1000,
+  max: 100,
   message: { error: "Too many requests, please try again later." },
-  standardHeaders: true, // Return rate limit info in the `RateLimit-*` headers
-  legacyHeaders: false, // Disable the `X-RateLimit-*` headers
+  standardHeaders: true,
+  legacyHeaders: false,
 });
-app.use("/api/", limiter); // Apply rate limiting to all API routes
+app.use("/api/", limiter);
 
-// Stricter rate limit for auth endpoints (login/register)
 const authLimiter = rateLimit({
-  windowMs: 15 * 60 * 1000, // 15 minutes
-  max: 10, // limit each IP to 10 login attempts per 15 minutes
+  windowMs: 15 * 60 * 1000,
+  max: 10,
   message: { error: "Too many login attempts, please try again later." },
 });
 app.use("/api/auth/", authLimiter);
 
-// CORS - allow only your frontend origin (update for production)
+// ===== CORS CONFIGURATION - FIXED =====
+// Define allowed origins (NO TRAILING SLASHES)
+const allowedOrigins = [
+  'http://localhost:3000',           // Local development
+  'http://localhost:3001',           // Alternative local port
+  'https://financepro-tracker.netlify.app',  // Your live frontend
+  'https://calm-valkyrie-150d5d.netlify.app', // Your old Netlify URL
+  process.env.CORS_ORIGIN            // Environment variable (if set)
+].filter(Boolean); // Remove any undefined values
+
 app.use(cors({
-  origin: process.env.CORS_ORIGIN || "http://localhost:3000",
+  origin: function (origin, callback) {
+    // Allow requests with no origin (like mobile apps or curl)
+    if (!origin) return callback(null, true);
+    
+    if (allowedOrigins.indexOf(origin) !== -1) {
+      callback(null, true);
+    } else {
+      console.log(`Blocked CORS request from: ${origin}`);
+      callback(new Error(`CORS policy does not allow access from ${origin}`));
+    }
+  },
   credentials: true,
+  methods: ['GET', 'POST', 'PUT', 'DELETE', 'OPTIONS'],
+  allowedHeaders: ['Content-Type', 'Authorization']
 }));
 
-// Body parsing
+// Handle preflight requests explicitly
+app.options('*', cors());
+
 app.use(express.json());
 
 // ===== ROUTES =====
@@ -50,7 +69,7 @@ const expenseRoutes = require("./routes/expenses");
 app.use("/api/auth", authRoutes);
 app.use("/api/expenses", expenseRoutes);
 
-// Health check endpoint
+// Health check
 app.get("/api/health", async (req, res) => {
   try {
     await pool.query("SELECT 1");
@@ -60,17 +79,31 @@ app.get("/api/health", async (req, res) => {
   }
 });
 
-// Test database tables endpoint (optional, remove in production)
-app.get("/api/test-db", async (req, res) => {
-  try {
-    const result = await pool.query("SELECT table_name FROM information_schema.tables WHERE table_schema = 'public'");
-    res.json({ tables: result.rows });
-  } catch (err) {
-    res.json({ error: err.message });
-  }
+// Root route - simple message
+app.get("/", (req, res) => {
+  res.json({ 
+    message: "Expense Tracker API is running",
+    endpoints: {
+      health: "/api/health",
+      register: "/api/auth/register",
+      login: "/api/auth/login",
+      expenses: "/api/expenses"
+    }
+  });
 });
 
-// Start server
-app.listen(PORT, () => {
+// Global error handler for uncaught exceptions
+process.on("unhandledRejection", (reason, promise) => {
+  console.error("Unhandled Rejection at:", promise, "reason:", reason);
+  // Don't exit immediately - let the server try to recover
+  console.error("Unhandled Rejection - continuing...");
+});
+
+// Start server with error handling
+const server = app.listen(PORT, () => {
   console.log(`Server running on port ${PORT}`);
+  console.log(`CORS allowed origins:`, allowedOrigins);
+}).on("error", (err) => {
+  console.error("Server failed to start:", err);
+  process.exit(1);
 });
