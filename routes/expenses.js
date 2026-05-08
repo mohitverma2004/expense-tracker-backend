@@ -205,16 +205,24 @@ router.get("/budget-status", async (req, res) => {
   }
 });
 
-// PUT /api/expenses/budget - Update monthly budget (WORKING VERSION)
+// PUT /api/expenses/budget - FINAL WORKING VERSION
 router.put("/budget", async (req, res) => {
   console.log("=== BUDGET UPDATE ===");
-  console.log("Body:", req.body);
+  console.log("Request body:", req.body);
   console.log("User ID:", req.user.id);
   
-  const budgetAmount = parseFloat(req.body.monthly_budget);
+  // Get budget from request
+  let budgetAmount = req.body.monthly_budget;
+  
+  if (budgetAmount === undefined) {
+    return res.status(400).json({ error: "Budget amount is required" });
+  }
+  
+  // Convert to number
+  budgetAmount = Number(budgetAmount);
   
   if (isNaN(budgetAmount)) {
-    return res.status(400).json({ error: "Valid budget amount is required" });
+    return res.status(400).json({ error: "Budget must be a valid number" });
   }
   
   if (budgetAmount < 0) {
@@ -222,7 +230,7 @@ router.put("/budget", async (req, res) => {
   }
   
   try {
-    // First ensure the column exists
+    // First, ensure column exists
     await pool.query(`
       DO $$
       BEGIN
@@ -239,16 +247,16 @@ router.put("/budget", async (req, res) => {
       [budgetAmount, req.user.id]
     );
     
-    console.log("Updated successfully:", result.rows[0]);
+    console.log("Update result:", result.rows[0]);
     
     res.json({
       success: true,
-      monthly_budget: parseFloat(result.rows[0].monthly_budget),
+      monthly_budget: Number(result.rows[0].monthly_budget),
       message: `Budget updated to ₹${budgetAmount}`
     });
   } catch (err) {
     console.error("Budget update error:", err);
-    res.status(500).json({ error: "Failed to update budget: " + err.message });
+    res.status(500).json({ error: "Database error: " + err.message });
   }
 });
 
