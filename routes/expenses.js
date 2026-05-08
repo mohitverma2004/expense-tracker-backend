@@ -10,7 +10,7 @@ router.use(auth);
 router.get("/", async (req, res) => {
   const { month, year, category, limit } = req.query;
 
-  let query = "SELECT * FROM expenses WHERE user_id = $1 AND delete_flag = 0";
+  let query = "SELECT * FROM expenses WHERE user_id = $1 AND (delete_flag IS NULL OR delete_flag = 0)";
   const params = [req.user.id];
 
   if (month && year) {
@@ -43,8 +43,6 @@ router.get("/", async (req, res) => {
 router.post("/", async (req, res) => {
   const { title, amount, category, note, date } = req.body;
 
-  console.log("Add expense request:", { title, amount, category, date, userId: req.user.id });
-
   if (!title || !amount || !category || !date) {
     return res.status(400).json({ error: "Title, amount, category, and date are required." });
   }
@@ -60,7 +58,6 @@ router.post("/", async (req, res) => {
       [req.user.id, title, amount, category, note || "", date]
     );
     
-    console.log("Expense added:", result.rows[0]);
     res.status(201).json(result.rows[0]);
   } catch (err) {
     console.error("POST expense error:", err);
@@ -79,7 +76,7 @@ router.put("/:id", async (req, res) => {
 
   try {
     const check = await pool.query(
-      "SELECT id FROM expenses WHERE id = $1 AND user_id = $2 AND delete_flag = 0",
+      "SELECT id FROM expenses WHERE id = $1 AND user_id = $2 AND (delete_flag IS NULL OR delete_flag = 0)",
       [id, req.user.id]
     );
     if (check.rows.length === 0) {
@@ -99,20 +96,19 @@ router.put("/:id", async (req, res) => {
   }
 });
 
-// DELETE /api/expenses/:id — delete an expense
+// DELETE /api/expenses/:id — soft delete an expense
 router.delete("/:id", async (req, res) => {
   const { id } = req.params;
 
   try {
     const check = await pool.query(
-      "SELECT id FROM expenses WHERE id = $1 AND user_id = $2 AND delete_flag = 0",
+      "SELECT id FROM expenses WHERE id = $1 AND user_id = $2 AND (delete_flag IS NULL OR delete_flag = 0)",
       [id, req.user.id]
     );
     if (check.rows.length === 0) {
       return res.status(404).json({ error: "Expense not found." });
     }
 
-    // Soft delete - set delete_flag to 1
     await pool.query(
       "UPDATE expenses SET delete_flag = 1 WHERE id = $1 AND user_id = $2",
       [id, req.user.id]
@@ -136,7 +132,7 @@ router.get("/summary", async (req, res) => {
       `SELECT category, SUM(amount) as total
        FROM expenses
        WHERE user_id = $1
-         AND delete_flag = 0
+         AND (delete_flag IS NULL OR delete_flag = 0)
          AND EXTRACT(MONTH FROM date) = $2
          AND EXTRACT(YEAR FROM date) = $3
        GROUP BY category
@@ -161,7 +157,7 @@ router.get("/monthly-total", async (req, res) => {
       `SELECT COALESCE(SUM(amount), 0) as total
        FROM expenses
        WHERE user_id = $1
-         AND delete_flag = 0
+         AND (delete_flag IS NULL OR delete_flag = 0)
          AND EXTRACT(MONTH FROM date) = $2
          AND EXTRACT(YEAR FROM date) = $3`,
       [req.user.id, m, y]
@@ -185,21 +181,19 @@ router.get("/budget-status", async (req, res) => {
       "SELECT monthly_budget FROM users WHERE id = $1",
       [req.user.id]
     );
-    const budget = parseFloat(userResult.rows[0]?.monthly_budget) || 0;
+    const budget = userResult.rows[0]?.monthly_budget ? parseFloat(userResult.rows[0].monthly_budget) : 0;
 
     // Get total spent for the month
     const spentResult = await pool.query(
       `SELECT COALESCE(SUM(amount), 0) as total
        FROM expenses
        WHERE user_id = $1
-         AND delete_flag = 0
+         AND (delete_flag IS NULL OR delete_flag = 0)
          AND EXTRACT(MONTH FROM date) = $2
          AND EXTRACT(YEAR FROM date) = $3`,
       [req.user.id, m, y]
     );
     const spent = parseFloat(spentResult.rows[0]?.total) || 0;
-
-    console.log("Budget status:", { budget, spent, userId: req.user.id, month: m, year: y });
 
     res.json({
       budget: budget,
@@ -217,31 +211,69 @@ router.get("/budget-status", async (req, res) => {
 router.put("/budget", async (req, res) => {
   const { monthly_budget } = req.body;
 
-  console.log("Budget update request:", { monthly_budget, userId: req.user.id });
+  console.log("=== BUDGET UPDATE REQUEST ===");
+  console.log("Request body:", req.body);
+  console.log("monthly_budget value:", monthly_budget);
+  console.log("User ID:", req.user.id);
+  console.log("Type of monthly_budget:", typeof monthly_budget);
 
+  // Validate budget amount
   if (monthly_budget === undefined || monthly_budget === null) {
+    console.log("ERROR: Budget amount is missing");
     return res.status(400).json({ error: "Budget amount is required" });
   }
-
-  if (isNaN(parseFloat(monthly_budget)) || parseFloat(monthly_budget) < 0) {
-    return res.status(400).json({ error: "Valid budget amount is required" });
+  
+  let budgetAmount;
+  
+  // Handle both string and number input
+  if (typeof monthly_budget === 'string') {
+    budgetAmount = parseFloat(monthly_budget);
+  } else {
+    budgetAmount = monthly_budget;
+  }
+  
+  console.log("Parsed budget amount:", budgetAmount);
+  
+  if (isNaN(budgetAmount)) {
+    console.log("ERROR: Budget amount is not a number");
+    return res.status(400).json({ error: "Budget amount must be a valid number" });
+  }
+  
+  if (budgetAmount < 0) {
+    console.log("ERROR: Budget amount is negative");
+    return res.status(400).json({ error: "Budget amount cannot be negative" });
   }
 
   try {
-    const result = await pool.query(
-      "UPDATE users SET monthly_budget = $1 WHERE id = $2 RETURNING monthly_budget",
-      [parseFloat(monthly_budget), req.user.id]
+    // First check if user exists
+    const userCheck = await pool.query(
+      "SELECT id, monthly_budget FROM users WHERE id = $1",
+      [req.user.id]
     );
     
-    console.log("Budget updated:", result.rows[0]);
+    console.log("User found:", userCheck.rows[0]);
+    
+    if (userCheck.rows.length === 0) {
+      console.log("ERROR: User not found");
+      return res.status(404).json({ error: "User not found" });
+    }
+    
+    // Update the budget
+    const result = await pool.query(
+      "UPDATE users SET monthly_budget = $1 WHERE id = $2 RETURNING monthly_budget",
+      [budgetAmount, req.user.id]
+    );
+    
+    console.log("Update result:", result.rows[0]);
+    console.log("Budget updated successfully to:", budgetAmount);
     
     res.json({ 
-      monthly_budget: result.rows[0]?.monthly_budget || 0,
+      monthly_budget: parseFloat(result.rows[0].monthly_budget),
       message: "Budget updated successfully"
     });
   } catch (err) {
-    console.error("PUT budget error:", err);
-    res.status(500).json({ error: err.message });
+    console.error("Budget update database error:", err);
+    res.status(500).json({ error: "Database error: " + err.message });
   }
 });
 
@@ -255,7 +287,7 @@ router.get("/trends", async (req, res) => {
         SUM(amount) as total
        FROM expenses
        WHERE user_id = $1
-         AND delete_flag = 0
+         AND (delete_flag IS NULL OR delete_flag = 0)
          AND date >= NOW() - INTERVAL '6 months'
        GROUP BY EXTRACT(YEAR FROM date), EXTRACT(MONTH FROM date)
        ORDER BY year DESC, month DESC`,
@@ -287,7 +319,7 @@ router.get("/export", async (req, res) => {
       `SELECT title, amount, category, note, date
        FROM expenses
        WHERE user_id = $1
-         AND delete_flag = 0
+         AND (delete_flag IS NULL OR delete_flag = 0)
          AND EXTRACT(MONTH FROM date) = $2
          AND EXTRACT(YEAR FROM date) = $3
        ORDER BY date DESC`,
@@ -297,13 +329,13 @@ router.get("/export", async (req, res) => {
     const rows = result.rows;
     
     // Create CSV header and rows
-    const header = "Title,Amount,Category,Note,Date\n";
+    const header = "Title,Amount (₹),Category,Note,Date\n";
     const csv = rows.map((r) => {
-      // Escape quotes in fields
       const title = `"${(r.title || "").replace(/"/g, '""')}"`;
       const category = `"${(r.category || "").replace(/"/g, '""')}"`;
       const note = `"${(r.note || "").replace(/"/g, '""')}"`;
-      return `${title},${r.amount},${category},${note},${new Date(r.date).toLocaleDateString('en-IN')}`;
+      const date = new Date(r.date).toLocaleDateString('en-IN');
+      return `${title},${r.amount},${category},${note},${date}`;
     }).join("\n");
 
     res.setHeader("Content-Type", "text/csv; charset=utf-8");
