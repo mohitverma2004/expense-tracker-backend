@@ -6,6 +6,165 @@ const auth = require("../middleware/auth");
 // All routes below require login
 router.use(auth);
 
+// ===== SPECIFIC ROUTES FIRST (BEFORE dynamic routes) =====
+
+// GET /api/expenses/budget-status - Check budget vs spending
+router.get("/budget-status", async (req, res) => {
+  const { month, year } = req.query;
+  const m = month || new Date().getMonth() + 1;
+  const y = year || new Date().getFullYear();
+
+  try {
+    const userResult = await pool.query(
+      "SELECT COALESCE(monthly_budget, 0) as monthly_budget FROM users WHERE id = $1",
+      [req.user.id]
+    );
+    const budget = parseFloat(userResult.rows[0]?.monthly_budget) || 0;
+
+    const spentResult = await pool.query(
+      `SELECT COALESCE(SUM(amount), 0) as total
+       FROM expenses
+       WHERE user_id = $1
+         AND (delete_flag IS NULL OR delete_flag = 0)
+         AND EXTRACT(MONTH FROM date) = $2
+         AND EXTRACT(YEAR FROM date) = $3`,
+      [req.user.id, m, y]
+    );
+    const spent = parseFloat(spentResult.rows[0]?.total) || 0;
+
+    res.json({
+      budget: budget,
+      spent: spent,
+      remaining: budget - spent,
+      percentage: budget > 0 ? (spent / budget) * 100 : 0
+    });
+  } catch (err) {
+    console.error("GET budget-status error:", err);
+    res.status(500).json({ error: err.message });
+  }
+});
+
+// PUT /api/expenses/budget - Update monthly budget
+router.put("/budget", async (req, res) => {
+  console.log("=== BUDGET UPDATE ===");
+  console.log("Request body:", req.body);
+  console.log("User ID:", req.user.id);
+  
+  let budgetAmount = req.body.monthly_budget;
+  
+  if (budgetAmount === undefined) {
+    return res.status(400).json({ error: "Budget amount is required" });
+  }
+  
+  budgetAmount = Number(budgetAmount);
+  
+  if (isNaN(budgetAmount)) {
+    return res.status(400).json({ error: "Budget must be a valid number" });
+  }
+  
+  if (budgetAmount < 0) {
+    return res.status(400).json({ error: "Budget cannot be negative" });
+  }
+  
+  try {
+    // Ensure column exists
+    await pool.query(`
+      DO $$
+      BEGIN
+        IF NOT EXISTS (SELECT 1 FROM information_schema.columns 
+                       WHERE table_name = 'users' AND column_name = 'monthly_budget') THEN
+          ALTER TABLE users ADD COLUMN monthly_budget DECIMAL(10,2) DEFAULT 0;
+        END IF;
+      END $$;
+    `);
+    
+    const result = await pool.query(
+      "UPDATE users SET monthly_budget = $1 WHERE id = $2 RETURNING monthly_budget",
+      [budgetAmount, req.user.id]
+    );
+    
+    console.log("Update result:", result.rows[0]);
+    
+    res.json({
+      success: true,
+      monthly_budget: Number(result.rows[0].monthly_budget),
+      message: `Budget updated to ₹${budgetAmount}`
+    });
+  } catch (err) {
+    console.error("Budget update error:", err);
+    res.status(500).json({ error: "Database error: " + err.message });
+  }
+});
+
+// GET /api/expenses/trends - Get last 6 months trends
+router.get("/trends", async (req, res) => {
+  try {
+    const result = await pool.query(
+      `SELECT 
+        EXTRACT(MONTH FROM date) as month,
+        EXTRACT(YEAR FROM date) as year,
+        SUM(amount) as total
+       FROM expenses
+       WHERE user_id = $1
+         AND (delete_flag IS NULL OR delete_flag = 0)
+         AND date >= NOW() - INTERVAL '6 months'
+       GROUP BY EXTRACT(YEAR FROM date), EXTRACT(MONTH FROM date)
+       ORDER BY year DESC, month DESC`,
+      [req.user.id]
+    );
+    
+    const monthNames = ['Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun', 'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec'];
+    const formattedResults = result.rows.map(row => ({
+      ...row,
+      month: monthNames[parseInt(row.month) - 1]
+    }));
+    
+    res.json(formattedResults);
+  } catch (err) {
+    console.error("GET trends error:", err);
+    res.status(500).json({ error: err.message });
+  }
+});
+
+// GET /api/expenses/export — download CSV
+router.get("/export", async (req, res) => {
+  const { month, year } = req.query;
+  const m = month || new Date().getMonth() + 1;
+  const y = year || new Date().getFullYear();
+
+  try {
+    const result = await pool.query(
+      `SELECT title, amount, category, note, date
+       FROM expenses
+       WHERE user_id = $1
+         AND (delete_flag IS NULL OR delete_flag = 0)
+         AND EXTRACT(MONTH FROM date) = $2
+         AND EXTRACT(YEAR FROM date) = $3
+       ORDER BY date DESC`,
+      [req.user.id, m, y]
+    );
+
+    const rows = result.rows;
+    const header = "Title,Amount (₹),Category,Note,Date\n";
+    const csv = rows.map((r) => {
+      const title = `"${(r.title || "").replace(/"/g, '""')}"`;
+      const category = `"${(r.category || "").replace(/"/g, '""')}"`;
+      const note = `"${(r.note || "").replace(/"/g, '""')}"`;
+      const date = new Date(r.date).toLocaleDateString('en-IN');
+      return `${title},${r.amount},${category},${note},${date}`;
+    }).join("\n");
+
+    res.setHeader("Content-Type", "text/csv; charset=utf-8");
+    res.setHeader("Content-Disposition", `attachment; filename=expenses_${m}_${y}.csv`);
+    res.send(header + csv);
+  } catch (err) {
+    console.error("GET export error:", err);
+    res.status(500).json({ error: err.message });
+  }
+});
+
+// ===== DYNAMIC ROUTES (WITH :id) LAST =====
+
 // GET /api/expenses — get all expenses for logged in user
 router.get("/", async (req, res) => {
   const { month, year, category, limit } = req.query;
@@ -35,6 +194,54 @@ router.get("/", async (req, res) => {
     res.json(result.rows);
   } catch (err) {
     console.error("GET expenses error:", err);
+    res.status(500).json({ error: err.message });
+  }
+});
+
+// GET /api/expenses/summary — category totals for any month
+router.get("/summary", async (req, res) => {
+  const { month, year } = req.query;
+  const m = month || new Date().getMonth() + 1;
+  const y = year || new Date().getFullYear();
+
+  try {
+    const result = await pool.query(
+      `SELECT category, SUM(amount) as total
+       FROM expenses
+       WHERE user_id = $1
+         AND (delete_flag IS NULL OR delete_flag = 0)
+         AND EXTRACT(MONTH FROM date) = $2
+         AND EXTRACT(YEAR FROM date) = $3
+       GROUP BY category
+       ORDER BY total DESC`,
+      [req.user.id, m, y]
+    );
+    res.json(result.rows);
+  } catch (err) {
+    console.error("GET summary error:", err);
+    res.status(500).json({ error: err.message });
+  }
+});
+
+// GET /api/expenses/monthly-total — total spend for a month
+router.get("/monthly-total", async (req, res) => {
+  const { month, year } = req.query;
+  const m = month || new Date().getMonth() + 1;
+  const y = year || new Date().getFullYear();
+
+  try {
+    const result = await pool.query(
+      `SELECT COALESCE(SUM(amount), 0) as total
+       FROM expenses
+       WHERE user_id = $1
+         AND (delete_flag IS NULL OR delete_flag = 0)
+         AND EXTRACT(MONTH FROM date) = $2
+         AND EXTRACT(YEAR FROM date) = $3`,
+      [req.user.id, m, y]
+    );
+    res.json({ total: parseFloat(result.rows[0].total), month: m, year: y });
+  } catch (err) {
+    console.error("GET monthly-total error:", err);
     res.status(500).json({ error: err.message });
   }
 });
@@ -117,212 +324,6 @@ router.delete("/:id", async (req, res) => {
     res.json({ message: "Expense deleted successfully." });
   } catch (err) {
     console.error("DELETE expense error:", err);
-    res.status(500).json({ error: err.message });
-  }
-});
-
-// GET /api/expenses/summary — category totals for any month
-router.get("/summary", async (req, res) => {
-  const { month, year } = req.query;
-  const m = month || new Date().getMonth() + 1;
-  const y = year || new Date().getFullYear();
-
-  try {
-    const result = await pool.query(
-      `SELECT category, SUM(amount) as total
-       FROM expenses
-       WHERE user_id = $1
-         AND (delete_flag IS NULL OR delete_flag = 0)
-         AND EXTRACT(MONTH FROM date) = $2
-         AND EXTRACT(YEAR FROM date) = $3
-       GROUP BY category
-       ORDER BY total DESC`,
-      [req.user.id, m, y]
-    );
-    res.json(result.rows);
-  } catch (err) {
-    console.error("GET summary error:", err);
-    res.status(500).json({ error: err.message });
-  }
-});
-
-// GET /api/expenses/monthly-total — total spend for a month
-router.get("/monthly-total", async (req, res) => {
-  const { month, year } = req.query;
-  const m = month || new Date().getMonth() + 1;
-  const y = year || new Date().getFullYear();
-
-  try {
-    const result = await pool.query(
-      `SELECT COALESCE(SUM(amount), 0) as total
-       FROM expenses
-       WHERE user_id = $1
-         AND (delete_flag IS NULL OR delete_flag = 0)
-         AND EXTRACT(MONTH FROM date) = $2
-         AND EXTRACT(YEAR FROM date) = $3`,
-      [req.user.id, m, y]
-    );
-    res.json({ total: parseFloat(result.rows[0].total), month: m, year: y });
-  } catch (err) {
-    console.error("GET monthly-total error:", err);
-    res.status(500).json({ error: err.message });
-  }
-});
-
-// GET /api/expenses/budget-status - Check budget vs spending
-router.get("/budget-status", async (req, res) => {
-  const { month, year } = req.query;
-  const m = month || new Date().getMonth() + 1;
-  const y = year || new Date().getFullYear();
-
-  try {
-    const userResult = await pool.query(
-      "SELECT COALESCE(monthly_budget, 0) as monthly_budget FROM users WHERE id = $1",
-      [req.user.id]
-    );
-    const budget = parseFloat(userResult.rows[0]?.monthly_budget) || 0;
-
-    const spentResult = await pool.query(
-      `SELECT COALESCE(SUM(amount), 0) as total
-       FROM expenses
-       WHERE user_id = $1
-         AND (delete_flag IS NULL OR delete_flag = 0)
-         AND EXTRACT(MONTH FROM date) = $2
-         AND EXTRACT(YEAR FROM date) = $3`,
-      [req.user.id, m, y]
-    );
-    const spent = parseFloat(spentResult.rows[0]?.total) || 0;
-
-    res.json({
-      budget: budget,
-      spent: spent,
-      remaining: budget - spent,
-      percentage: budget > 0 ? (spent / budget) * 100 : 0
-    });
-  } catch (err) {
-    console.error("GET budget-status error:", err);
-    res.status(500).json({ error: err.message });
-  }
-});
-
-// PUT /api/expenses/budget - FINAL WORKING VERSION
-router.put("/budget", async (req, res) => {
-  console.log("=== BUDGET UPDATE ===");
-  console.log("Request body:", req.body);
-  console.log("User ID:", req.user.id);
-  
-  // Get budget from request
-  let budgetAmount = req.body.monthly_budget;
-  
-  if (budgetAmount === undefined) {
-    return res.status(400).json({ error: "Budget amount is required" });
-  }
-  
-  // Convert to number
-  budgetAmount = Number(budgetAmount);
-  
-  if (isNaN(budgetAmount)) {
-    return res.status(400).json({ error: "Budget must be a valid number" });
-  }
-  
-  if (budgetAmount < 0) {
-    return res.status(400).json({ error: "Budget cannot be negative" });
-  }
-  
-  try {
-    // First, ensure column exists
-    await pool.query(`
-      DO $$
-      BEGIN
-        IF NOT EXISTS (SELECT 1 FROM information_schema.columns 
-                       WHERE table_name = 'users' AND column_name = 'monthly_budget') THEN
-          ALTER TABLE users ADD COLUMN monthly_budget DECIMAL(10,2) DEFAULT 0;
-        END IF;
-      END $$;
-    `);
-    
-    // Update the budget
-    const result = await pool.query(
-      "UPDATE users SET monthly_budget = $1 WHERE id = $2 RETURNING monthly_budget",
-      [budgetAmount, req.user.id]
-    );
-    
-    console.log("Update result:", result.rows[0]);
-    
-    res.json({
-      success: true,
-      monthly_budget: Number(result.rows[0].monthly_budget),
-      message: `Budget updated to ₹${budgetAmount}`
-    });
-  } catch (err) {
-    console.error("Budget update error:", err);
-    res.status(500).json({ error: "Database error: " + err.message });
-  }
-});
-
-// GET /api/expenses/trends - Get last 6 months trends
-router.get("/trends", async (req, res) => {
-  try {
-    const result = await pool.query(
-      `SELECT 
-        EXTRACT(MONTH FROM date) as month,
-        EXTRACT(YEAR FROM date) as year,
-        SUM(amount) as total
-       FROM expenses
-       WHERE user_id = $1
-         AND (delete_flag IS NULL OR delete_flag = 0)
-         AND date >= NOW() - INTERVAL '6 months'
-       GROUP BY EXTRACT(YEAR FROM date), EXTRACT(MONTH FROM date)
-       ORDER BY year DESC, month DESC`,
-      [req.user.id]
-    );
-    
-    const monthNames = ['Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun', 'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec'];
-    const formattedResults = result.rows.map(row => ({
-      ...row,
-      month: monthNames[parseInt(row.month) - 1]
-    }));
-    
-    res.json(formattedResults);
-  } catch (err) {
-    console.error("GET trends error:", err);
-    res.status(500).json({ error: err.message });
-  }
-});
-
-// GET /api/expenses/export — download CSV
-router.get("/export", async (req, res) => {
-  const { month, year } = req.query;
-  const m = month || new Date().getMonth() + 1;
-  const y = year || new Date().getFullYear();
-
-  try {
-    const result = await pool.query(
-      `SELECT title, amount, category, note, date
-       FROM expenses
-       WHERE user_id = $1
-         AND (delete_flag IS NULL OR delete_flag = 0)
-         AND EXTRACT(MONTH FROM date) = $2
-         AND EXTRACT(YEAR FROM date) = $3
-       ORDER BY date DESC`,
-      [req.user.id, m, y]
-    );
-
-    const rows = result.rows;
-    const header = "Title,Amount (₹),Category,Note,Date\n";
-    const csv = rows.map((r) => {
-      const title = `"${(r.title || "").replace(/"/g, '""')}"`;
-      const category = `"${(r.category || "").replace(/"/g, '""')}"`;
-      const note = `"${(r.note || "").replace(/"/g, '""')}"`;
-      const date = new Date(r.date).toLocaleDateString('en-IN');
-      return `${title},${r.amount},${category},${note},${date}`;
-    }).join("\n");
-
-    res.setHeader("Content-Type", "text/csv; charset=utf-8");
-    res.setHeader("Content-Disposition", `attachment; filename=expenses_${m}_${y}.csv`);
-    res.send(header + csv);
-  } catch (err) {
-    console.error("GET export error:", err);
     res.status(500).json({ error: err.message });
   }
 });
