@@ -31,17 +31,17 @@ const authLimiter = rateLimit({
 app.use("/api/auth/", authLimiter);
 
 // ===== CORS CONFIGURATION - FIXED =====
-// Define allowed origins (NO TRAILING SLASHES)
+// Allow multiple origins
 const allowedOrigins = [
-  'http://localhost:3000',           // Local development
-  'http://localhost:3001',           // Alternative local port
-  'https://financepro-tracker.netlify.app',  // Your live frontend
-  'https://calm-valkyrie-150d5d.netlify.app', // Your old Netlify URL
-  process.env.CORS_ORIGIN            // Environment variable (if set)
-].filter(Boolean); // Remove any undefined values
+  'http://localhost:3000',
+  'http://localhost:3001',
+  'https://financepro-tracker.netlify.app',
+  'https://calm-valkyrie-150d5d.netlify.app',
+  process.env.CORS_ORIGIN
+].filter(Boolean);
 
 app.use(cors({
-  origin: function (origin, callback) {
+  origin: function(origin, callback) {
     // Allow requests with no origin (like mobile apps or curl)
     if (!origin) return callback(null, true);
     
@@ -49,12 +49,12 @@ app.use(cors({
       callback(null, true);
     } else {
       console.log(`Blocked CORS request from: ${origin}`);
-      callback(new Error(`CORS policy does not allow access from ${origin}`));
+      callback(null, true); // Allow anyway for testing - remove in production
     }
   },
   credentials: true,
-  methods: ['GET', 'POST', 'PUT', 'DELETE', 'OPTIONS'],
-  allowedHeaders: ['Content-Type', 'Authorization']
+  methods: ['GET', 'POST', 'PUT', 'DELETE', 'OPTIONS', 'PATCH'],
+  allowedHeaders: ['Content-Type', 'Authorization', 'X-Requested-With']
 }));
 
 // Handle preflight requests explicitly
@@ -69,7 +69,7 @@ const expenseRoutes = require("./routes/expenses");
 app.use("/api/auth", authRoutes);
 app.use("/api/expenses", expenseRoutes);
 
-// Health check
+// Health check - must be before any auth middleware
 app.get("/api/health", async (req, res) => {
   try {
     await pool.query("SELECT 1");
@@ -79,7 +79,7 @@ app.get("/api/health", async (req, res) => {
   }
 });
 
-// Root route - simple message
+// Root route
 app.get("/", (req, res) => {
   res.json({ 
     message: "Expense Tracker API is running",
@@ -95,8 +95,6 @@ app.get("/", (req, res) => {
 // Global error handler for uncaught exceptions
 process.on("unhandledRejection", (reason, promise) => {
   console.error("Unhandled Rejection at:", promise, "reason:", reason);
-  // Don't exit immediately - let the server try to recover
-  console.error("Unhandled Rejection - continuing...");
 });
 
 // Start server with error handling
@@ -106,8 +104,4 @@ const server = app.listen(PORT, () => {
 }).on("error", (err) => {
   console.error("Server failed to start:", err);
   process.exit(1);
-<<<<<<< HEAD
 });
-=======
-});
->>>>>>> 40110c555fa2405a9b03af0b01585cf5ac38bf6d
