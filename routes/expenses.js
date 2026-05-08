@@ -176,12 +176,23 @@ router.get("/budget-status", async (req, res) => {
   const y = year || new Date().getFullYear();
 
   try {
+    // First ensure column exists
+    await pool.query(`
+      DO $$
+      BEGIN
+        IF NOT EXISTS (SELECT 1 FROM information_schema.columns 
+                       WHERE table_name = 'users' AND column_name = 'monthly_budget') THEN
+          ALTER TABLE users ADD COLUMN monthly_budget DECIMAL(10,2) DEFAULT 0;
+        END IF;
+      END $$;
+    `);
+    
     // Get user's monthly budget
     const userResult = await pool.query(
-      "SELECT monthly_budget FROM users WHERE id = $1",
+      "SELECT COALESCE(monthly_budget, 0) as monthly_budget FROM users WHERE id = $1",
       [req.user.id]
     );
-    const budget = userResult.rows[0]?.monthly_budget ? parseFloat(userResult.rows[0].monthly_budget) : 0;
+    const budget = parseFloat(userResult.rows[0]?.monthly_budget) || 0;
 
     // Get total spent for the month
     const spentResult = await pool.query(
@@ -207,72 +218,58 @@ router.get("/budget-status", async (req, res) => {
   }
 });
 
-// PUT /api/expenses/budget - Update monthly budget
+// PUT /api/expenses/budget - Update monthly budget (FIXED VERSION)
 router.put("/budget", async (req, res) => {
-  const { monthly_budget } = req.body;
-
   console.log("=== BUDGET UPDATE REQUEST ===");
-  console.log("Request body:", req.body);
-  console.log("monthly_budget value:", monthly_budget);
+  console.log("Body:", req.body);
   console.log("User ID:", req.user.id);
-  console.log("Type of monthly_budget:", typeof monthly_budget);
-
-  // Validate budget amount
-  if (monthly_budget === undefined || monthly_budget === null) {
-    console.log("ERROR: Budget amount is missing");
+  
+  let budgetAmount = req.body.monthly_budget;
+  
+  if (budgetAmount === undefined) {
     return res.status(400).json({ error: "Budget amount is required" });
   }
   
-  let budgetAmount;
-  
-  // Handle both string and number input
-  if (typeof monthly_budget === 'string') {
-    budgetAmount = parseFloat(monthly_budget);
-  } else {
-    budgetAmount = monthly_budget;
-  }
-  
-  console.log("Parsed budget amount:", budgetAmount);
+  budgetAmount = parseFloat(budgetAmount);
   
   if (isNaN(budgetAmount)) {
-    console.log("ERROR: Budget amount is not a number");
-    return res.status(400).json({ error: "Budget amount must be a valid number" });
+    return res.status(400).json({ error: "Budget must be a number" });
   }
   
   if (budgetAmount < 0) {
-    console.log("ERROR: Budget amount is negative");
-    return res.status(400).json({ error: "Budget amount cannot be negative" });
+    return res.status(400).json({ error: "Budget cannot be negative" });
   }
-
+  
   try {
-    // First check if user exists
-    const userCheck = await pool.query(
-      "SELECT id, monthly_budget FROM users WHERE id = $1",
-      [req.user.id]
-    );
+    // Ensure column exists
+    await pool.query(`
+      DO $$
+      BEGIN
+        IF NOT EXISTS (SELECT 1 FROM information_schema.columns 
+                       WHERE table_name = 'users' AND column_name = 'monthly_budget') THEN
+          ALTER TABLE users ADD COLUMN monthly_budget DECIMAL(10,2) DEFAULT 0;
+        END IF;
+      END $$;
+    `);
     
-    console.log("User found:", userCheck.rows[0]);
-    
-    if (userCheck.rows.length === 0) {
-      console.log("ERROR: User not found");
-      return res.status(404).json({ error: "User not found" });
-    }
-    
-    // Update the budget
+    // Update budget
     const result = await pool.query(
-      "UPDATE users SET monthly_budget = $1 WHERE id = $2 RETURNING monthly_budget",
+      `UPDATE users 
+       SET monthly_budget = $1 
+       WHERE id = $2 
+       RETURNING monthly_budget`,
       [budgetAmount, req.user.id]
     );
     
     console.log("Update result:", result.rows[0]);
-    console.log("Budget updated successfully to:", budgetAmount);
     
-    res.json({ 
+    res.json({
+      success: true,
       monthly_budget: parseFloat(result.rows[0].monthly_budget),
-      message: "Budget updated successfully"
+      message: `Budget updated to ₹${budgetAmount}`
     });
   } catch (err) {
-    console.error("Budget update database error:", err);
+    console.error("Budget update error:", err);
     res.status(500).json({ error: "Database error: " + err.message });
   }
 });
@@ -294,7 +291,6 @@ router.get("/trends", async (req, res) => {
       [req.user.id]
     );
     
-    // Format month numbers to names
     const monthNames = ['Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun', 'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec'];
     const formattedResults = result.rows.map(row => ({
       ...row,
@@ -327,8 +323,6 @@ router.get("/export", async (req, res) => {
     );
 
     const rows = result.rows;
-    
-    // Create CSV header and rows
     const header = "Title,Amount (₹),Category,Note,Date\n";
     const csv = rows.map((r) => {
       const title = `"${(r.title || "").replace(/"/g, '""')}"`;
