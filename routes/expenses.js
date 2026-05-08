@@ -1,364 +1,318 @@
-import React, { useState, useEffect, useCallback } from 'react';
-import axios from 'axios';
-import toast, { Toaster } from 'react-hot-toast';
-import { FiEdit2, FiTrash2, FiPlus, FiX, FiCalendar, FiTag, FiDollarSign } from 'react-icons/fi';
+const express = require("express");
+const router = express.Router();
+const pool = require("../models/db");
+const auth = require("../middleware/auth");
 
-const API_URL = 'https://expense-tracker-api-wrxh.onrender.com/api';
+// All routes below require login
+router.use(auth);
 
-const CATEGORIES = ['Food', 'Transport', 'Bills', 'Shopping', 'Health', 'Entertainment', 'Other'];
-const CATEGORY_ICONS = {
-  Food: '🍔', Transport: '🚗', Bills: '💡', 
-  Shopping: '🛍️', Health: '💊', Entertainment: '🎬', Other: '📌'
-};
+// GET /api/expenses — get all expenses for logged in user
+router.get("/", async (req, res) => {
+  const { month, year, category, limit } = req.query;
 
-function ExpensesPage() {
-  const [expenses, setExpenses] = useState([]);
-  const [loading, setLoading] = useState(true);
-  const [showForm, setShowForm] = useState(false);
-  const [editingExpense, setEditingExpense] = useState(null);
-  const [selectedMonth, setSelectedMonth] = useState(new Date().getMonth() + 1);
-  const [selectedYear, setSelectedYear] = useState(new Date().getFullYear());
-  const [formData, setFormData] = useState({
-    title: '',
-    amount: '',
-    category: 'Food',
-    note: '',
-    date: new Date().toISOString().split('T')[0]
-  });
+  let query = "SELECT * FROM expenses WHERE user_id = $1 AND delete_flag = 0";
+  const params = [req.user.id];
 
-  const token = localStorage.getItem('token');
+  if (month && year) {
+    params.push(month, year);
+    query += ` AND EXTRACT(MONTH FROM date) = $${params.length - 1} AND EXTRACT(YEAR FROM date) = $${params.length}`;
+  }
 
-  const fetchExpenses = useCallback(async () => {
-    try {
-      setLoading(true);
-      const response = await axios.get(`${API_URL}/expenses`, {
-        headers: { Authorization: `Bearer ${token}` },
-        params: { month: selectedMonth, year: selectedYear }
-      });
-      setExpenses(response.data);
-    } catch (error) {
-      console.error('Error fetching expenses:', error);
-      if (error.response?.status === 401) {
-        toast.error('Session expired. Please login again.');
-        localStorage.removeItem('token');
-        localStorage.removeItem('user');
-        window.location.href = '/login';
-      } else {
-        toast.error('Failed to load expenses');
-      }
-    } finally {
-      setLoading(false);
-    }
-  }, [token, selectedMonth, selectedYear]);
+  if (category) {
+    params.push(category);
+    query += ` AND category = $${params.length}`;
+  }
 
-  useEffect(() => {
-    fetchExpenses();
-  }, [fetchExpenses]);
+  query += " ORDER BY date DESC";
 
-  const handleSubmit = async (e) => {
-    e.preventDefault();
+  if (limit) {
+    params.push(limit);
+    query += ` LIMIT $${params.length}`;
+  }
+
+  try {
+    const result = await pool.query(query, params);
+    res.json(result.rows);
+  } catch (err) {
+    console.error("GET expenses error:", err);
+    res.status(500).json({ error: err.message });
+  }
+});
+
+// POST /api/expenses — add new expense
+router.post("/", async (req, res) => {
+  const { title, amount, category, note, date } = req.body;
+
+  console.log("Add expense request:", { title, amount, category, date, userId: req.user.id });
+
+  if (!title || !amount || !category || !date) {
+    return res.status(400).json({ error: "Title, amount, category, and date are required." });
+  }
+
+  if (amount <= 0) {
+    return res.status(400).json({ error: "Amount must be greater than 0." });
+  }
+
+  try {
+    const result = await pool.query(
+      `INSERT INTO expenses (user_id, title, amount, category, note, date, created_at) 
+       VALUES ($1, $2, $3, $4, $5, $6, NOW()) RETURNING *`,
+      [req.user.id, title, amount, category, note || "", date]
+    );
     
-    // Validation
-    if (!formData.title.trim()) {
-      toast.error('Please enter a title');
-      return;
+    console.log("Expense added:", result.rows[0]);
+    res.status(201).json(result.rows[0]);
+  } catch (err) {
+    console.error("POST expense error:", err);
+    res.status(500).json({ error: err.message });
+  }
+});
+
+// PUT /api/expenses/:id — edit an expense
+router.put("/:id", async (req, res) => {
+  const { title, amount, category, note, date } = req.body;
+  const { id } = req.params;
+
+  if (!title || !amount || !category || !date) {
+    return res.status(400).json({ error: "Title, amount, category, and date are required." });
+  }
+
+  try {
+    const check = await pool.query(
+      "SELECT id FROM expenses WHERE id = $1 AND user_id = $2 AND delete_flag = 0",
+      [id, req.user.id]
+    );
+    if (check.rows.length === 0) {
+      return res.status(404).json({ error: "Expense not found." });
     }
-    if (!formData.amount || parseFloat(formData.amount) <= 0) {
-      toast.error('Please enter a valid amount');
-      return;
-    }
-    if (!formData.date) {
-      toast.error('Please select a date');
-      return;
-    }
+
+    const result = await pool.query(
+      `UPDATE expenses SET title=$1, amount=$2, category=$3, note=$4, date=$5 
+       WHERE id=$6 AND user_id=$7 RETURNING *`,
+      [title, amount, category, note || "", date, id, req.user.id]
+    );
     
-    try {
-      const expenseData = {
-        title: formData.title.trim(),
-        amount: parseFloat(formData.amount),
-        category: formData.category,
-        note: formData.note || '',
-        date: formData.date
-      };
-      
-      if (editingExpense) {
-        await axios.put(`${API_URL}/expenses/${editingExpense.id}`, expenseData, {
-          headers: { Authorization: `Bearer ${token}` }
-        });
-        toast.success('Expense updated successfully!');
-      } else {
-        await axios.post(`${API_URL}/expenses`, expenseData, {
-          headers: { Authorization: `Bearer ${token}` }
-        });
-        toast.success('Expense added successfully!');
-      }
-      
-      resetForm();
-      fetchExpenses();
-    } catch (error) {
-      console.error('Error saving expense:', error);
-      if (error.response?.status === 401) {
-        toast.error('Session expired. Please login again.');
-        localStorage.removeItem('token');
-        localStorage.removeItem('user');
-        window.location.href = '/login';
-      } else {
-        toast.error(error.response?.data?.error || 'Failed to save expense');
-      }
+    res.json(result.rows[0]);
+  } catch (err) {
+    console.error("PUT expense error:", err);
+    res.status(500).json({ error: err.message });
+  }
+});
+
+// DELETE /api/expenses/:id — delete an expense
+router.delete("/:id", async (req, res) => {
+  const { id } = req.params;
+
+  try {
+    const check = await pool.query(
+      "SELECT id FROM expenses WHERE id = $1 AND user_id = $2 AND delete_flag = 0",
+      [id, req.user.id]
+    );
+    if (check.rows.length === 0) {
+      return res.status(404).json({ error: "Expense not found." });
     }
-  };
 
-  const handleDelete = async (id) => {
-    if (window.confirm('Are you sure you want to delete this expense?')) {
-      try {
-        await axios.delete(`${API_URL}/expenses/${id}`, {
-          headers: { Authorization: `Bearer ${token}` }
-        });
-        toast.success('Expense deleted successfully!');
-        fetchExpenses();
-      } catch (error) {
-        console.error('Error deleting expense:', error);
-        if (error.response?.status === 401) {
-          toast.error('Session expired. Please login again.');
-          localStorage.removeItem('token');
-          localStorage.removeItem('user');
-          window.location.href = '/login';
-        } else {
-          toast.error('Failed to delete expense');
-        }
-      }
-    }
-  };
+    // Soft delete - set delete_flag to 1
+    await pool.query(
+      "UPDATE expenses SET delete_flag = 1 WHERE id = $1 AND user_id = $2",
+      [id, req.user.id]
+    );
+    
+    res.json({ message: "Expense deleted successfully." });
+  } catch (err) {
+    console.error("DELETE expense error:", err);
+    res.status(500).json({ error: err.message });
+  }
+});
 
-  const handleEdit = (expense) => {
-    setEditingExpense(expense);
-    setFormData({
-      title: expense.title,
-      amount: expense.amount,
-      category: expense.category,
-      note: expense.note || '',
-      date: expense.date.split('T')[0]
+// GET /api/expenses/summary — category totals for any month
+router.get("/summary", async (req, res) => {
+  const { month, year } = req.query;
+  const m = month || new Date().getMonth() + 1;
+  const y = year || new Date().getFullYear();
+
+  try {
+    const result = await pool.query(
+      `SELECT category, SUM(amount) as total
+       FROM expenses
+       WHERE user_id = $1
+         AND delete_flag = 0
+         AND EXTRACT(MONTH FROM date) = $2
+         AND EXTRACT(YEAR FROM date) = $3
+       GROUP BY category
+       ORDER BY total DESC`,
+      [req.user.id, m, y]
+    );
+    res.json(result.rows);
+  } catch (err) {
+    console.error("GET summary error:", err);
+    res.status(500).json({ error: err.message });
+  }
+});
+
+// GET /api/expenses/monthly-total — total spend for a month
+router.get("/monthly-total", async (req, res) => {
+  const { month, year } = req.query;
+  const m = month || new Date().getMonth() + 1;
+  const y = year || new Date().getFullYear();
+
+  try {
+    const result = await pool.query(
+      `SELECT COALESCE(SUM(amount), 0) as total
+       FROM expenses
+       WHERE user_id = $1
+         AND delete_flag = 0
+         AND EXTRACT(MONTH FROM date) = $2
+         AND EXTRACT(YEAR FROM date) = $3`,
+      [req.user.id, m, y]
+    );
+    res.json({ total: parseFloat(result.rows[0].total), month: m, year: y });
+  } catch (err) {
+    console.error("GET monthly-total error:", err);
+    res.status(500).json({ error: err.message });
+  }
+});
+
+// GET /api/expenses/budget-status - Check budget vs spending
+router.get("/budget-status", async (req, res) => {
+  const { month, year } = req.query;
+  const m = month || new Date().getMonth() + 1;
+  const y = year || new Date().getFullYear();
+
+  try {
+    // Get user's monthly budget
+    const userResult = await pool.query(
+      "SELECT monthly_budget FROM users WHERE id = $1",
+      [req.user.id]
+    );
+    const budget = parseFloat(userResult.rows[0]?.monthly_budget) || 0;
+
+    // Get total spent for the month
+    const spentResult = await pool.query(
+      `SELECT COALESCE(SUM(amount), 0) as total
+       FROM expenses
+       WHERE user_id = $1
+         AND delete_flag = 0
+         AND EXTRACT(MONTH FROM date) = $2
+         AND EXTRACT(YEAR FROM date) = $3`,
+      [req.user.id, m, y]
+    );
+    const spent = parseFloat(spentResult.rows[0]?.total) || 0;
+
+    console.log("Budget status:", { budget, spent, userId: req.user.id, month: m, year: y });
+
+    res.json({
+      budget: budget,
+      spent: spent,
+      remaining: budget - spent,
+      percentage: budget > 0 ? (spent / budget) * 100 : 0
     });
-    setShowForm(true);
-    // Scroll to form
-    setTimeout(() => {
-      document.getElementById('expense-form')?.scrollIntoView({ behavior: 'smooth' });
-    }, 100);
-  };
+  } catch (err) {
+    console.error("GET budget-status error:", err);
+    res.status(500).json({ error: err.message });
+  }
+});
 
-  const resetForm = () => {
-    setEditingExpense(null);
-    setFormData({
-      title: '',
-      amount: '',
-      category: 'Food',
-      note: '',
-      date: new Date().toISOString().split('T')[0]
+// PUT /api/expenses/budget - Update monthly budget
+router.put("/budget", async (req, res) => {
+  const { monthly_budget } = req.body;
+
+  console.log("Budget update request:", { monthly_budget, userId: req.user.id });
+
+  if (monthly_budget === undefined || monthly_budget === null) {
+    return res.status(400).json({ error: "Budget amount is required" });
+  }
+
+  if (isNaN(parseFloat(monthly_budget)) || parseFloat(monthly_budget) < 0) {
+    return res.status(400).json({ error: "Valid budget amount is required" });
+  }
+
+  try {
+    const result = await pool.query(
+      "UPDATE users SET monthly_budget = $1 WHERE id = $2 RETURNING monthly_budget",
+      [parseFloat(monthly_budget), req.user.id]
+    );
+    
+    console.log("Budget updated:", result.rows[0]);
+    
+    res.json({ 
+      monthly_budget: result.rows[0]?.monthly_budget || 0,
+      message: "Budget updated successfully"
     });
-    setShowForm(false);
-  };
+  } catch (err) {
+    console.error("PUT budget error:", err);
+    res.status(500).json({ error: err.message });
+  }
+});
 
-  const formatINR = (amount) => {
-    return new Intl.NumberFormat('en-IN', {
-      style: 'currency',
-      currency: 'INR',
-      minimumFractionDigits: 0,
-      maximumFractionDigits: 0
-    }).format(amount);
-  };
+// GET /api/expenses/trends - Get last 6 months trends
+router.get("/trends", async (req, res) => {
+  try {
+    const result = await pool.query(
+      `SELECT 
+        EXTRACT(MONTH FROM date) as month,
+        EXTRACT(YEAR FROM date) as year,
+        SUM(amount) as total
+       FROM expenses
+       WHERE user_id = $1
+         AND delete_flag = 0
+         AND date >= NOW() - INTERVAL '6 months'
+       GROUP BY EXTRACT(YEAR FROM date), EXTRACT(MONTH FROM date)
+       ORDER BY year DESC, month DESC`,
+      [req.user.id]
+    );
+    
+    // Format month numbers to names
+    const monthNames = ['Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun', 'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec'];
+    const formattedResults = result.rows.map(row => ({
+      ...row,
+      month: monthNames[parseInt(row.month) - 1]
+    }));
+    
+    res.json(formattedResults);
+  } catch (err) {
+    console.error("GET trends error:", err);
+    res.status(500).json({ error: err.message });
+  }
+});
 
-  const formatDate = (dateString) => {
-    return new Date(dateString).toLocaleDateString('en-IN', {
-      day: 'numeric',
-      month: 'short',
-      year: 'numeric'
-    });
-  };
+// GET /api/expenses/export — download CSV
+router.get("/export", async (req, res) => {
+  const { month, year } = req.query;
+  const m = month || new Date().getMonth() + 1;
+  const y = year || new Date().getFullYear();
 
-  const totalAmount = expenses.reduce((sum, exp) => sum + parseFloat(exp.amount), 0);
+  try {
+    const result = await pool.query(
+      `SELECT title, amount, category, note, date
+       FROM expenses
+       WHERE user_id = $1
+         AND delete_flag = 0
+         AND EXTRACT(MONTH FROM date) = $2
+         AND EXTRACT(YEAR FROM date) = $3
+       ORDER BY date DESC`,
+      [req.user.id, m, y]
+    );
 
-  return (
-    <div className="min-h-screen bg-gray-50 dark:bg-gray-900 pb-20">
-      <Toaster position="top-right" />
-      
-      {/* Page Header */}
-      <div className="bg-white dark:bg-gray-800 border-b border-gray-200 dark:border-gray-700 px-6 py-4">
-        <div className="flex justify-between items-center">
-          <div>
-            <h1 className="text-2xl font-bold text-gray-800 dark:text-white">Expenses</h1>
-            <p className="text-gray-500 dark:text-gray-400 text-sm mt-1">
-              Manage all your transactions
-            </p>
-          </div>
-          <button
-            onClick={() => { resetForm(); setShowForm(!showForm); }}
-            className="flex items-center gap-2 px-4 py-2 bg-indigo-600 text-white rounded-xl hover:bg-indigo-700 transition-all touch-manipulation"
-          >
-            {showForm ? <FiX size={18} /> : <FiPlus size={18} />}
-            {showForm ? 'Cancel' : 'Add Expense'}
-          </button>
-        </div>
-      </div>
+    const rows = result.rows;
+    
+    // Create CSV header and rows
+    const header = "Title,Amount,Category,Note,Date\n";
+    const csv = rows.map((r) => {
+      // Escape quotes in fields
+      const title = `"${(r.title || "").replace(/"/g, '""')}"`;
+      const category = `"${(r.category || "").replace(/"/g, '""')}"`;
+      const note = `"${(r.note || "").replace(/"/g, '""')}"`;
+      return `${title},${r.amount},${category},${note},${new Date(r.date).toLocaleDateString('en-IN')}`;
+    }).join("\n");
 
-      <div className="p-6">
-        {/* Filters */}
-        <div className="bg-white dark:bg-gray-800 rounded-xl shadow-sm p-4 mb-6 flex flex-wrap gap-4 items-center">
-          <div className="flex items-center gap-2">
-            <FiCalendar className="text-gray-400" />
-            <select
-              value={selectedMonth}
-              onChange={(e) => setSelectedMonth(parseInt(e.target.value))}
-              className="px-3 py-2 border border-gray-300 dark:border-gray-600 rounded-lg bg-white dark:bg-gray-700 text-gray-800 dark:text-white"
-            >
-              {Array.from({ length: 12 }, (_, i) => i + 1).map(m => (
-                <option key={m} value={m}>{new Date(2000, m - 1, 1).toLocaleString('default', { month: 'long' })}</option>
-              ))}
-            </select>
-          </div>
-          <div className="flex items-center gap-2">
-            <select
-              value={selectedYear}
-              onChange={(e) => setSelectedYear(parseInt(e.target.value))}
-              className="px-3 py-2 border border-gray-300 dark:border-gray-600 rounded-lg bg-white dark:bg-gray-700 text-gray-800 dark:text-white"
-            >
-              {[2023, 2024, 2025, 2026].map(y => <option key={y} value={y}>{y}</option>)}
-            </select>
-          </div>
-          <div className="ml-auto flex items-center gap-2">
-            <span className="text-sm text-gray-500">Total:</span>
-            <span className="text-xl font-bold text-indigo-600">{formatINR(totalAmount)}</span>
-          </div>
-        </div>
+    res.setHeader("Content-Type", "text/csv; charset=utf-8");
+    res.setHeader("Content-Disposition", `attachment; filename=expenses_${m}_${y}.csv`);
+    res.send(header + csv);
+  } catch (err) {
+    console.error("GET export error:", err);
+    res.status(500).json({ error: err.message });
+  }
+});
 
-        {/* Add/Edit Form */}
-        {showForm && (
-          <div id="expense-form" className="bg-white dark:bg-gray-800 rounded-xl shadow-sm p-6 mb-6 border border-indigo-100 dark:border-indigo-900">
-            <h3 className="text-lg font-semibold text-gray-800 dark:text-white mb-4">
-              {editingExpense ? 'Edit Expense' : 'Add New Expense'}
-            </h3>
-            <form onSubmit={handleSubmit} className="grid grid-cols-1 md:grid-cols-2 gap-4">
-              <input
-                type="text"
-                placeholder="Title *"
-                value={formData.title}
-                onChange={(e) => setFormData({ ...formData, title: e.target.value })}
-                className="px-4 py-3 border border-gray-300 dark:border-gray-600 rounded-xl bg-white dark:bg-gray-700 text-gray-800 dark:text-white focus:outline-none focus:ring-2 focus:ring-indigo-500"
-                required
-              />
-              <input
-                type="number"
-                placeholder="Amount (₹) *"
-                value={formData.amount}
-                onChange={(e) => setFormData({ ...formData, amount: e.target.value })}
-                className="px-4 py-3 border border-gray-300 dark:border-gray-600 rounded-xl bg-white dark:bg-gray-700 text-gray-800 dark:text-white focus:outline-none focus:ring-2 focus:ring-indigo-500"
-                required
-                step="1"
-              />
-              <select
-                value={formData.category}
-                onChange={(e) => setFormData({ ...formData, category: e.target.value })}
-                className="px-4 py-3 border border-gray-300 dark:border-gray-600 rounded-xl bg-white dark:bg-gray-700 text-gray-800 dark:text-white focus:outline-none focus:ring-2 focus:ring-indigo-500"
-              >
-                {CATEGORIES.map(cat => (
-                  <option key={cat} value={cat}>{CATEGORY_ICONS[cat]} {cat}</option>
-                ))}
-              </select>
-              <input
-                type="date"
-                value={formData.date}
-                onChange={(e) => setFormData({ ...formData, date: e.target.value })}
-                className="px-4 py-3 border border-gray-300 dark:border-gray-600 rounded-xl bg-white dark:bg-gray-700 text-gray-800 dark:text-white focus:outline-none focus:ring-2 focus:ring-indigo-500"
-                required
-              />
-              <textarea
-                placeholder="Note (optional)"
-                value={formData.note}
-                onChange={(e) => setFormData({ ...formData, note: e.target.value })}
-                className="md:col-span-2 px-4 py-3 border border-gray-300 dark:border-gray-600 rounded-xl bg-white dark:bg-gray-700 text-gray-800 dark:text-white focus:outline-none focus:ring-2 focus:ring-indigo-500"
-                rows="2"
-              />
-              <div className="md:col-span-2 flex gap-3">
-                <button
-                  type="submit"
-                  className="flex-1 bg-indigo-600 text-white py-3 rounded-xl font-semibold hover:bg-indigo-700 transition-colors touch-manipulation"
-                >
-                  {editingExpense ? 'Update Expense' : 'Save Expense'}
-                </button>
-                <button
-                  type="button"
-                  onClick={resetForm}
-                  className="flex-1 bg-gray-200 dark:bg-gray-700 text-gray-700 dark:text-gray-300 py-3 rounded-xl font-semibold hover:bg-gray-300 dark:hover:bg-gray-600 transition-colors touch-manipulation"
-                >
-                  Cancel
-                </button>
-              </div>
-            </form>
-          </div>
-        )}
-
-        {/* Expenses List */}
-        {loading ? (
-          <div className="flex items-center justify-center py-12">
-            <div className="w-8 h-8 border-3 border-indigo-500 border-t-transparent rounded-full animate-spin"></div>
-          </div>
-        ) : expenses.length === 0 ? (
-          <div className="bg-white dark:bg-gray-800 rounded-xl shadow-sm p-12 text-center">
-            <div className="text-5xl mb-4">📭</div>
-            <p className="text-gray-500 dark:text-gray-400">No expenses found for this period</p>
-            <button
-              onClick={() => { resetForm(); setShowForm(true); }}
-              className="mt-4 text-indigo-600 hover:text-indigo-700 font-medium"
-            >
-              + Add your first expense
-            </button>
-          </div>
-        ) : (
-          <div className="space-y-3">
-            {expenses.map((expense) => (
-              <div
-                key={expense.id}
-                className="bg-white dark:bg-gray-800 rounded-xl shadow-sm p-4 flex flex-wrap md:flex-nowrap justify-between items-center gap-3 hover:shadow-md transition-shadow"
-              >
-                <div className="flex items-center gap-3 flex-1 min-w-0">
-                  <div className="w-10 h-10 rounded-xl flex items-center justify-center text-xl flex-shrink-0 bg-gray-100 dark:bg-gray-700">
-                    {CATEGORY_ICONS[expense.category] || '📌'}
-                  </div>
-                  <div className="flex-1 min-w-0">
-                    <p className="font-semibold text-gray-800 dark:text-white truncate">{expense.title}</p>
-                    <div className="flex flex-wrap gap-2 items-center mt-1">
-                      <span className="text-xs text-gray-500 dark:text-gray-400 flex items-center gap-1">
-                        <FiTag size={10} /> {expense.category}
-                      </span>
-                      <span className="text-xs text-gray-500 dark:text-gray-400 flex items-center gap-1">
-                        <FiCalendar size={10} /> {formatDate(expense.date)}
-                      </span>
-                    </div>
-                  </div>
-                </div>
-                <div className="flex items-center gap-3">
-                  <p className="text-lg font-bold text-red-500">{formatINR(expense.amount)}</p>
-                  <div className="flex gap-1">
-                    <button
-                      onClick={() => handleEdit(expense)}
-                      className="p-2 text-indigo-500 hover:bg-indigo-50 dark:hover:bg-indigo-900/30 rounded-lg transition-colors touch-manipulation"
-                    >
-                      <FiEdit2 size={18} />
-                    </button>
-                    <button
-                      onClick={() => handleDelete(expense.id)}
-                      className="p-2 text-red-500 hover:bg-red-50 dark:hover:bg-red-900/30 rounded-lg transition-colors touch-manipulation"
-                    >
-                      <FiTrash2 size={18} />
-                    </button>
-                  </div>
-                </div>
-              </div>
-            ))}
-          </div>
-        )}
-      </div>
-    </div>
-  );
-}
-
-export default ExpensesPage;
+module.exports = router;
