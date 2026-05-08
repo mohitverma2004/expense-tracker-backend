@@ -106,4 +106,8 @@ const server = app.listen(PORT, () => {
 }).on("error", (err) => {
   console.error("Server failed to start:", err);
   process.exit(1);
+<<<<<<< HEAD
 });
+=======
+});
+>>>>>>> 40110c555fa2405a9b03af0b01585cf5ac38bf6d
