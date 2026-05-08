@@ -176,25 +176,12 @@ router.get("/budget-status", async (req, res) => {
   const y = year || new Date().getFullYear();
 
   try {
-    // First ensure column exists
-    await pool.query(`
-      DO $$
-      BEGIN
-        IF NOT EXISTS (SELECT 1 FROM information_schema.columns 
-                       WHERE table_name = 'users' AND column_name = 'monthly_budget') THEN
-          ALTER TABLE users ADD COLUMN monthly_budget DECIMAL(10,2) DEFAULT 0;
-        END IF;
-      END $$;
-    `);
-    
-    // Get user's monthly budget
     const userResult = await pool.query(
       "SELECT COALESCE(monthly_budget, 0) as monthly_budget FROM users WHERE id = $1",
       [req.user.id]
     );
     const budget = parseFloat(userResult.rows[0]?.monthly_budget) || 0;
 
-    // Get total spent for the month
     const spentResult = await pool.query(
       `SELECT COALESCE(SUM(amount), 0) as total
        FROM expenses
@@ -218,22 +205,16 @@ router.get("/budget-status", async (req, res) => {
   }
 });
 
-// PUT /api/expenses/budget - Update monthly budget (FIXED VERSION)
+// PUT /api/expenses/budget - Update monthly budget (WORKING VERSION)
 router.put("/budget", async (req, res) => {
-  console.log("=== BUDGET UPDATE REQUEST ===");
+  console.log("=== BUDGET UPDATE ===");
   console.log("Body:", req.body);
   console.log("User ID:", req.user.id);
   
-  let budgetAmount = req.body.monthly_budget;
-  
-  if (budgetAmount === undefined) {
-    return res.status(400).json({ error: "Budget amount is required" });
-  }
-  
-  budgetAmount = parseFloat(budgetAmount);
+  const budgetAmount = parseFloat(req.body.monthly_budget);
   
   if (isNaN(budgetAmount)) {
-    return res.status(400).json({ error: "Budget must be a number" });
+    return res.status(400).json({ error: "Valid budget amount is required" });
   }
   
   if (budgetAmount < 0) {
@@ -241,7 +222,7 @@ router.put("/budget", async (req, res) => {
   }
   
   try {
-    // Ensure column exists
+    // First ensure the column exists
     await pool.query(`
       DO $$
       BEGIN
@@ -252,16 +233,13 @@ router.put("/budget", async (req, res) => {
       END $$;
     `);
     
-    // Update budget
+    // Update the budget
     const result = await pool.query(
-      `UPDATE users 
-       SET monthly_budget = $1 
-       WHERE id = $2 
-       RETURNING monthly_budget`,
+      "UPDATE users SET monthly_budget = $1 WHERE id = $2 RETURNING monthly_budget",
       [budgetAmount, req.user.id]
     );
     
-    console.log("Update result:", result.rows[0]);
+    console.log("Updated successfully:", result.rows[0]);
     
     res.json({
       success: true,
@@ -270,7 +248,7 @@ router.put("/budget", async (req, res) => {
     });
   } catch (err) {
     console.error("Budget update error:", err);
-    res.status(500).json({ error: "Database error: " + err.message });
+    res.status(500).json({ error: "Failed to update budget: " + err.message });
   }
 });
 
